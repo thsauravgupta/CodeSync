@@ -18,6 +18,40 @@ const io = new Server(server, { cors: { origin: "*" } });
 const ysocketio = new YSocketIO(io, {});
 ysocketio.initialize();
 
+io.on("connection", (socket) => {
+    console.log(`User Connected: ${socket.id}`);
+
+    // 1. Join Room
+    socket.on("join-room", (roomId) => {
+        socket.join(roomId);
+        console.log(`User ${socket.id} joined room: ${roomId}`);
+    });
+
+    // 2. Sync Language Change
+    socket.on("language-change", ({ roomId, language }) => {
+        // Broadcast to everyone else in the room (excluding sender)
+        socket.to(roomId).emit("language-change", language);
+        console.log(`Room ${roomId} language changed to: ${language}`);
+    });
+
+    // 3. Sync Code Execution Output
+    socket.on("code-output", ({ roomId, output }) => {
+        // Broadcast to everyone else in the room
+        socket.to(roomId).emit("code-output", output);
+    });
+    socket.on("file-change", ({ roomId, fileName }) => {
+        // Broadcast to everyone else
+        socket.to(roomId).emit("file-change", fileName);
+    });
+
+    socket.on("disconnect", () => {
+        console.log("User Disconnected", socket.id);
+    });
+    socket.on("chat-message", (data) => {
+        // Broadcast to everyone else
+        socket.to(data.roomId).emit("chat-message", data);
+    });
+});
 // --- Docker Execution Engine ---
 
 // 1. Config: Which docker image to use for which language
@@ -90,6 +124,7 @@ app.post("/execute", (req, res) => {
         res.json({ output: stdout });
     });
 });
+
 
 server.listen(3001, () => {
     console.log("SERVER RUNNING on http://localhost:3001");
