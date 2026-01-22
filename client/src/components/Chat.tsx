@@ -1,113 +1,98 @@
-import { useState, useEffect, useRef } from 'react';
+import { useEffect, useRef } from 'react';
 
 interface ChatProps {
   socket: any;
   roomId: string;
   username: string;
+  messages: any[]; // Received from parent
+  setMessages: React.Dispatch<React.SetStateAction<any[]>>; // To update parent state
 }
 
-const Chat = ({ socket, roomId, username }: ChatProps) => {
-  const [messages, setMessages] = useState<any[]>([]);
-  const [currentMsg, setCurrentMsg] = useState("");
-  const [isVoiceActive, setIsVoiceActive] = useState(false);
+const Chat = ({ socket, roomId, username, messages, setMessages }: ChatProps) => {
   const messagesEndRef = useRef<null | HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
+  // Auto-scroll to bottom when messages change
   useEffect(() => {
-    if (!socket) return;
-
-    // Listen for incoming messages
-    socket.on("chat-message", (data: any) => {
-      setMessages((prev) => [...prev, data]);
-      scrollToBottom();
-    });
-
-    return () => {
-      socket.off("chat-message");
-    };
-  }, [socket]);
-
-  const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  };
+  }, [messages]);
 
   const sendMessage = () => {
-    if (currentMsg.trim() === "") return;
+    const input = inputRef.current;
+    if (!input || input.value.trim() === "") return;
 
     const msgData = {
       roomId,
       username,
-      text: currentMsg,
+      text: input.value,
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     };
 
-    // Send to server
+    // 1. Send to Server (Broadcast to others)
     socket.emit("chat-message", msgData);
     
-    // Update my own UI immediately
+    // 2. Update Local State (Show it to myself)
     setMessages((prev) => [...prev, msgData]);
-    setCurrentMsg("");
-    scrollToBottom();
+    
+    input.value = "";
   };
 
-  const toggleVoice = () => {
-
-     setIsVoiceActive(!isVoiceActive);
-     alert("Voice Logic will be activated in the next step!");
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') sendMessage();
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: '#111', borderLeft: '1px solid #333' }}>
+    <div className="flex-col" style={{ height: '100%', background: '#111' }}>
       
-      {/* Voice Room Header */}
-      <div style={{ padding: '10px', borderBottom: '1px solid #333', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#1e1e1e' }}>
-         <span style={{ fontWeight: 'bold' }}>Voice Room</span>
-         <button 
-           onClick={toggleVoice}
-           style={{ 
-             padding: '5px 10px', 
-             borderRadius: '20px', 
-             border: 'none', 
-             background: isVoiceActive ? '#28a745' : '#444', 
-             color: '#fff', 
-             cursor: 'pointer',
-             fontSize: '12px',
-             display: 'flex', alignItems: 'center', gap: '5px'
-           }}
-         >
-           {isVoiceActive ? "● On Air" : "Join Audio"}
-         </button>
-      </div>
-
       {/* Messages Area */}
       <div style={{ flex: 1, overflowY: 'auto', padding: '10px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
         {messages.map((msg, idx) => (
           <div key={idx} style={{ 
             alignSelf: msg.username === username ? 'flex-end' : 'flex-start',
-            maxWidth: '80%',
-            background: msg.username === username ? '#007acc' : '#333',
+            maxWidth: '85%',
+            background: msg.username === username ? '#007acc' : '#252526',
             padding: '8px 12px',
             borderRadius: '8px',
-            fontSize: '14px'
+            border: '1px solid #333'
           }}>
-            <div style={{ fontSize: '10px', color: '#ccc', marginBottom: '2px' }}>{msg.username}</div>
-            <div>{msg.text}</div>
-            <div style={{ fontSize: '9px', color: 'rgba(255,255,255,0.5)', textAlign: 'right', marginTop: '2px' }}>{msg.time}</div>
+            <div style={{ fontSize: '11px', color: '#ccc', marginBottom: '2px', fontWeight: 'bold' }}>
+              {msg.username}
+            </div>
+            <div style={{ fontSize: '14px', color: '#e0e0e0', wordBreak: 'break-word' }}>
+              {msg.text}
+            </div>
+            <div style={{ fontSize: '9px', color: 'rgba(255,255,255,0.5)', textAlign: 'right', marginTop: '4px' }}>
+              {msg.time}
+            </div>
           </div>
         ))}
         <div ref={messagesEndRef} />
       </div>
 
       {/* Input Area */}
-      <div style={{ padding: '10px', borderTop: '1px solid #333', display: 'flex', gap: '5px' }}>
+      <div style={{ padding: '10px', borderTop: '1px solid #333', background: '#181818', display: 'flex', gap: '8px' }}>
         <input 
+          ref={inputRef}
           type="text" 
-          value={currentMsg} 
-          onChange={(e) => setCurrentMsg(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
+          onKeyDown={handleKeyDown}
           placeholder="Type a message..."
-          style={{ flex: 1, padding: '8px', borderRadius: '4px', border: '1px solid #444', background: '#222', color: '#fff' }}
+          style={{ 
+            flex: 1, 
+            padding: '10px', 
+            borderRadius: '4px', 
+            border: '1px solid #333', 
+            background: '#0d0d0d', 
+            color: '#fff',
+            outline: 'none'
+          }}
         />
-        <button onClick={sendMessage} style={{ background: 'transparent', border: 'none', cursor: 'pointer', fontSize: '18px' }}>🚀</button>
+        <button 
+          onClick={sendMessage} 
+          className="btn-primary" 
+          style={{ padding: '0 15px', fontSize: '1.2rem' }}
+        >
+          ➤
+        </button>
       </div>
     </div>
   );
