@@ -4,109 +4,73 @@ import * as Y from 'yjs';
 import { SocketIOProvider } from 'y-socket.io';
 import { MonacoBinding } from 'y-monaco';
 import io, { Socket } from 'socket.io-client';
-import Chat from './Chat'; // Importing the new Chat component
+import Chat from './Chat';
 
 interface CodeEditorProps {
   roomId: string;
   username: string;
-  avatar?: string;
-  password?: string;
   onLeave: () => void;
 }
 
-// Default Files
+// Default initial files
 const INITIAL_FILES = {
   "script.js": { name: "script.js", language: "javascript", value: "// Start coding..." },
   "style.css": { name: "style.css", language: "css", value: "/* Add styles here */" },
-  "index.html": { name: "index.html", language: "html", value: "" }
+  "README.md": { name: "README.md", language: "markdown", value: "# Project Title" }
 };
 
-const CodeEditor = ({ roomId, username, password, onLeave }: CodeEditorProps) => {
+const CodeEditor = ({ roomId, username, onLeave }: CodeEditorProps) => {
   const [editorRef, setEditorRef] = useState<any>(null);
   const [files, setFiles] = useState<any>(INITIAL_FILES);
   const [activeFile, setActiveFile] = useState("script.js");
-  const [activeTab, setActiveTab] = useState<'files' | 'chat'>('files');
-  
-  // Terminal / Runner State
   const [output, setOutput] = useState(""); 
   const [isRunning, setIsRunning] = useState(false);
-  
-  // Socket & Chat State
   const [socket, setSocket] = useState<Socket | null>(null);
-  const [messages, setMessages] = useState<any[]>([]); // Lifted State for Chat
+  const [activeTab, setActiveTab] = useState<'files' | 'chat'>('files');
 
-  // Refs for Yjs cleanup
+  // We need refs to clean up Yjs bindings properly when switching files
   const providerRef = useRef<SocketIOProvider | null>(null);
   const docRef = useRef<Y.Doc | null>(null);
   const bindingRef = useRef<MonacoBinding | null>(null);
 
-  // --- 1. GLOBAL SOCKET SETUP (Chat, Events, Runner) ---
   useEffect(() => {
-    // Connect to Backend
-    const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:3001";
-    const newSocket = io(SERVER_URL);
+    // 1. Basic Socket Setup (Run once)
+    const newSocket = io("http://localhost:3001");
     setSocket(newSocket);
+    newSocket.emit("join-room", roomId);
 
-    // Join Room with Password
-    newSocket.emit("join-room", { roomId, username, password });
-
-    // Listeners
-    newSocket.on("error", (msg) => {
-        alert(msg);
-        onLeave();
-    });
-
-    newSocket.on("notification", (msg) => {
-        // Optional: Add a system message to chat
-        setMessages(prev => [...prev, { username: "System", text: msg, time: "Now" }]);
-    });
-
-    // Chat Logic
-    newSocket.on("chat-history", (history: any[]) => {
-        setMessages(history);
-    });
-
-    newSocket.on("chat-message", (msg) => {
-        setMessages(prev => [...prev, msg]);
-    });
-
-    // File Switching Logic
+    newSocket.on("code-output", (out: string) => setOutput(out));
+    
+    // Listen for file switching from other users
     newSocket.on("file-change", (fileName: string) => {
        setActiveFile(fileName);
     });
 
-    // Code Runner Logic
-    newSocket.on("code-output", (out: string) => setOutput(out));
+    return () => { newSocket.disconnect(); };
+  }, [roomId]);
 
-    return () => {
-      newSocket.disconnect();
-    };
-  }, [roomId, username, password, onLeave]);
 
-  // --- 2. YJS EDITOR BINDING (Syncs Code) ---
+  // 2. Yjs Binding Logic (Runs every time activeFile or Editor changes)
   useEffect(() => {
-    if (!editorRef || !socket) return;
+    if (!editorRef) return;
 
-    // Cleanup old bindings
+    // Cleanup old binding before creating a new one
     if (providerRef.current) providerRef.current.destroy();
     if (docRef.current) docRef.current.destroy();
     if (bindingRef.current) bindingRef.current.destroy();
 
-    // Init Yjs
+    // Create new Yjs Doc for this specific file
+    // Note: We use a unique room name per file
     const ydoc = new Y.Doc();
-    const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:3001";
-    
-    // Create Provider (Unique room per file)
     const provider = new SocketIOProvider(
-      SERVER_URL, 
-      `${roomId}-${activeFile}`, 
+      "http://localhost:3001", 
+      `${roomId}-${activeFile}`, // <--- Unique room for each file
       ydoc, 
       { autoConnect: true }
     );
     
     const yText = ydoc.getText('monaco');
     
-    // Bind to Monaco
     const binding = new MonacoBinding(
         yText, 
         editorRef.getModel()!, 
@@ -114,7 +78,7 @@ const CodeEditor = ({ roomId, username, password, onLeave }: CodeEditorProps) =>
         provider.awareness
     );
 
-    // Set Cursor Awareness
+    // Set user awareness
     provider.awareness.setLocalStateField('user', {
         name: username,
         color: '#' + Math.floor(Math.random()*16777215).toString(16)
@@ -125,24 +89,27 @@ const CodeEditor = ({ roomId, username, password, onLeave }: CodeEditorProps) =>
     bindingRef.current = binding;
 
     return () => {
+      // Cleanup happens on next run or unmount
       provider.destroy();
       ydoc.destroy();
       binding.destroy();
     };
-  }, [editorRef, activeFile, roomId, username, socket]);
+  }, [editorRef, activeFile, roomId, username]);
 
-  // --- HANDLERS ---
   const handleFileClick = (fileName: string) => {
     setActiveFile(fileName);
+    // Tell everyone else to switch too
     socket?.emit("file-change", { roomId, fileName });
   };
 
   const runCode = async () => {
     setIsRunning(true);
+    // We only run the active file's content
+    // Note: In a real IDE, you'd save current content to 'files' state first
     const currentCode = editorRef.getValue(); 
+    
     try {
-        const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:3001";
-        const response = await fetch(`${SERVER_URL}/execute`, {
+        const response = await fetch("http://localhost:3001/execute", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ 
@@ -161,40 +128,25 @@ const CodeEditor = ({ roomId, username, password, onLeave }: CodeEditorProps) =>
   };
 
   return (
-    <div className="App">
-       {/* Toolbar */}
-       <div className="toolbar">
-          <div style={{display: 'flex', alignItems: 'center', gap: '15px'}}>
-             <h3 style={{ margin: 0, color: '#61dafb' }}>CodeSync</h3>
-             <div style={{ fontSize: '12px', background: '#333', padding: '4px 8px', borderRadius: '4px', color: '#aaa', display: 'flex', gap: '10px' }}>
-                <span>Room: {roomId}</span>
-                {password && <span>🔒 Private</span>}
-             </div>
-          </div>
-          <div style={{ display: 'flex', gap: '10px' }}>
-            <button onClick={runCode} disabled={isRunning} className="btn btn-primary">
-                {isRunning ? "Running..." : "Run ▶"}
-            </button>
-            <button onClick={onLeave} className="btn btn-danger">Leave</button>
-          </div>
-      </div>
+    <div className="App" style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: '#0d0d0d', color: '#fff' }}>
+       {/* Toolbar ... */}
       
-      {/* Main Workspace (Full Screen) */}
-      <div className="workspace">
+      <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
         
-        {/* Sidebar */}
-        <div className="sidebar">
+        {/* SIDEBAR */}
+        <div style={{ width: '250px', background: '#111', borderRight: '1px solid #333', display: 'flex', flexDirection: 'column' }}>
+           
            {/* Sidebar Tabs */}
-           <div className="sidebar-header">
+           <div style={{ display: 'flex', borderBottom: '1px solid #333' }}>
               <button 
                 onClick={() => setActiveTab('files')}
-                className={`tab-btn ${activeTab === 'files' ? 'active' : ''}`}
+                style={{ flex: 1, padding: '10px', background: activeTab === 'files' ? '#1e1e1e' : 'transparent', color: activeTab === 'files' ? '#fff' : '#888', border: 'none', cursor: 'pointer' }}
               >
                 Files
               </button>
               <button 
                 onClick={() => setActiveTab('chat')}
-                className={`tab-btn ${activeTab === 'chat' ? 'active' : ''}`}
+                style={{ flex: 1, padding: '10px', background: activeTab === 'chat' ? '#1e1e1e' : 'transparent', color: activeTab === 'chat' ? '#fff' : '#888', border: 'none', cursor: 'pointer' }}
               >
                 Chat
               </button>
@@ -203,72 +155,48 @@ const CodeEditor = ({ roomId, username, password, onLeave }: CodeEditorProps) =>
            {/* Sidebar Content */}
            <div style={{ flex: 1, overflowY: 'auto' }}>
              {activeTab === 'files' ? (
+                // EXISTING FILE EXPLORER CODE
                 <div>
-                  <div style={{ padding: '15px', fontWeight: '600', fontSize: '0.8rem', color: '#666', letterSpacing: '1px' }}>EXPLORER</div>
+                  <div style={{ padding: '10px', fontWeight: 'bold', fontSize: '0.8em', color: '#888' }}>EXPLORER</div>
                    {Object.keys(files).map((fileName) => (
                      <div 
                        key={fileName}
                        onClick={() => handleFileClick(fileName)}
-                       style={{ 
-                         padding: '10px 15px', 
-                         cursor: 'pointer', 
-                         background: activeFile === fileName ? '#2a2d2e' : 'transparent',
-                         color: activeFile === fileName ? '#fff' : '#888',
-                         display: 'flex', alignItems: 'center', gap: '10px',
-                         fontSize: '14px'
-                       }}
+                       style={{ /* ... existing styles ... */ }}
                      >
-                       <span>{fileName.endsWith('js') ? '📄' : fileName.endsWith('css') ? '🎨' : '📝'}</span>
+                       <span style={{ fontSize: '12px' }}>{fileName.endsWith('js') ? '📄' : '📝'}</span>
                        {fileName}
                      </div>
                    ))}
                 </div>
              ) : (
-                <Chat 
-                  socket={socket} 
-                  roomId={roomId} 
-                  username={username} 
-                  messages={messages} 
-                  setMessages={setMessages}
-                />
+                // NEW CHAT COMPONENT
+                <Chat socket={socket} roomId={roomId} username={username} />
              )}
            </div>
         </div>
 
-        {/* Editor & Terminal Column */}
-        <div className="editor-container">
-             {/* Active File Header */}
-             <div style={{ background: '#1e1e1e', padding: '10px 20px', fontSize: '13px', color: '#ccc', borderBottom: '1px solid #333' }}>
-                {activeFile} <span style={{opacity: 0.5, marginLeft: '10px', fontSize: '11px'}}>(Live)</span>
+        {/* Editor Area */}
+        <div style={{ flex: 2, display: 'flex', flexDirection: 'column' }}>
+             {/* File Tab Header */}
+             <div style={{ background: '#1e1e1e', padding: '5px 20px', fontSize: '0.8em', color: '#aaa', borderBottom: '1px solid #333' }}>
+                {activeFile}
              </div>
-            
-            {/* Monaco Editor */}
-            <div style={{ flex: 1, overflow: 'hidden' }}>
-              <Editor
-                  height="100%"
-                  language={files[activeFile].language}
-                  theme="vs-dark"
-                  onMount={(editor) => setEditorRef(editor)}
-                  options={{ 
-                    minimap: { enabled: false }, 
-                    fontSize: 15, 
-                    padding: { top: 20 },
-                    scrollBeyondLastLine: false,
-                    automaticLayout: true 
-                  }}
-              />
-            </div>
+            <Editor
+                height="100%"
+                language={files[activeFile].language} // Dynamic Language
+                theme="vs-dark"
+                onMount={(editor) => setEditorRef(editor)}
+                options={{ minimap: { enabled: false }, fontSize: 16, padding: { top: 20 } }}
+            />
+        </div>
 
-            {/* Terminal Panel */}
-            <div className="terminal-panel">
-                <div style={{ padding: '8px 15px', background: '#222', borderBottom: '1px solid #333', fontWeight: 'bold', fontSize: '12px', color: '#aaa', display: 'flex', justifyContent: 'space-between' }}>
-                  <span>TERMINAL OUTPUT</span>
-                  <button onClick={() => setOutput("")} style={{background:'none', border:'none', color:'#666', cursor:'pointer', fontSize:'11px'}}>Clear</button>
-                </div>
-                <pre style={{ flex: 1, padding: '15px', color: '#00ff00', fontFamily: 'monospace', whiteSpace: 'pre-wrap', overflowY: 'auto', margin: 0, fontSize: '13px' }}>
-                    {output || "> Ready to compile..."}
-                </pre>
-            </div>
+        {/* Terminal */}
+        <div style={{ flex: 1, background: '#111', display: 'flex', flexDirection: 'column', borderLeft: '1px solid #333' }}>
+            <div style={{ padding: '10px', background: '#222', borderBottom: '1px solid #333', fontWeight: 'bold' }}>Output</div>
+            <pre style={{ padding: '15px', color: '#0f0', fontFamily: 'monospace', whiteSpace: 'pre-wrap', overflowY: 'auto' }}>
+                {output || "Waiting for output..."}
+            </pre>
         </div>
       </div>
     </div>
