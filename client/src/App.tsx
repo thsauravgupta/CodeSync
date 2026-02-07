@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import Lobby from './components/Lobby';
 import CodeEditor from './components/codeEditor';
 import Auth from './components/Auth';
-
+import Dashboard from './components/Dashboard';
 function App() {
   const [user, setUser] = useState<any>(null);
   const [step, setStep] = useState<"lobby" | "editor">("lobby");
@@ -46,13 +46,11 @@ function App() {
   // LOBBY SCREEN (Clean Dark Background)
   if (step === "lobby") {
     return (
-      <div style={{ height: '100vh', background: '#050505', position: 'relative' }}>
-         <div style={{ position: 'absolute', top: 20, right: 20, display: 'flex', gap: '15px', zIndex: 10 }}>
-            <span style={{ color: '#888', fontFamily: 'monospace' }}>OPERATOR: <span style={{ color: '#fff' }}>{user.name}</span></span>
-            <button onClick={handleLogout} className="btn-danger" style={{ padding: '5px 15px', fontSize: '12px' }}>LOGOUT</button>
-         </div>
-         <Lobby onJoin={handleJoin} />
-      </div>
+      <Dashboard 
+        user={user} 
+        onJoin={handleJoin} 
+        onLogout={handleLogout} 
+      />
     );
   }
 
