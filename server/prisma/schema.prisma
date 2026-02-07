@@ -1,0 +1,64 @@
+// server/prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL") // <--- This is the standard way
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  password  String   
+  name      String
+  
+  // Relations
+  projects  Project[]
+  messages  Message[]
+  createdAt DateTime @default(now())
+}
+
+model Project {
+  id        String   @id @default(uuid())
+  name      String
+  roomId    String   @unique
+  password  String?
+  language  String   @default("javascript")
+  
+  ownerId   String
+  owner     User     @relation(fields: [ownerId], references: [id])
+  
+  files     File[]
+  messages  Message[]
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model File {
+  id        String   @id @default(uuid())
+  name      String
+  content   String
+  language  String
+  
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  
+  updatedAt DateTime @updatedAt
+}
+
+model Message {
+  id        String   @id @default(uuid())
+  text      String
+  
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  
+  createdAt DateTime @default(now())
+}
