@@ -8,6 +8,7 @@ import { MonacoBinding } from 'y-monaco';
 import io, { Socket } from 'socket.io-client';
 import Chat from './Chat';
 import AudioRoom from './AudioRoom';
+import Terminal from './Terminal';
 
 interface CodeEditorProps {
   roomId: string;
@@ -271,19 +272,14 @@ const CodeEditor = ({ roomId, username, userId, password, onLeave }: CodeEditorP
             </div>
 
             {/* Terminal (Bottom 30%) */}
-            <div style={{ flex: 0.3, background: '#0a0a0a', display: 'flex', flexDirection: 'column' }}>
-                <div style={{ padding: '5px 15px', background: '#111', borderBottom: '1px solid #333', fontSize: '11px', color: '#666', letterSpacing: '1px' }}>
-                    TERMINAL_OUTPUT
-                </div>
-                <pre style={{ 
-                    flex: 1, padding: '15px', margin: 0, overflowY: 'auto',
-                    color: isRunning ? '#fff' : 'var(--neon-green)', 
-                    textShadow: '0 0 5px var(--neon-green)',
-                    fontFamily: 'monospace'
-                }}>
-                    {output || "> System Ready...\n> Waiting for input..."}
-                </pre>
+                    <div style={{ flex: 0.3, background: '#0a0a0a', borderTop: '1px solid #333', overflow: 'hidden' }}>
+            <div style={{ padding: '5px 15px', background: '#111', fontSize: '11px', color: '#666' }}>
+                TERMINAL (POWERSHELL/BASH)
             </div>
+            <div style={{ height: 'calc(100% - 25px)' }}> {/* Subtract header height */}
+                {socket && <Terminal socket={socket} />}
+            </div>
+        </div>
         </main>
       </div>
     </div>

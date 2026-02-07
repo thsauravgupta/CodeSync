@@ -38,12 +38,12 @@ function App() {
 
   if (loading) return <div style={{ background: '#000', height: '100vh' }}></div>;
 
-  // 1. LOGIN SCREEN (Shows Matrix Background)
+  // LOGIN SCREEN (Shows Matrix Background)
   if (!user) {
     return <Auth onLogin={handleLogin} />;
   }
 
-  // 2. LOBBY SCREEN (Clean Dark Background)
+  // LOBBY SCREEN (Clean Dark Background)
   if (step === "lobby") {
     return (
       <div style={{ height: '100vh', background: '#050505', position: 'relative' }}>

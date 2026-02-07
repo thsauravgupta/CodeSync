@@ -10,7 +10,7 @@ import fs from "fs";
 import { exec } from "child_process";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
-
+import { setupTerminal } from "./terminalHandler";
 dotenv.config();
 
 const app = express();
@@ -101,7 +101,7 @@ io.on("connection", (socket) => {
     // A. JOIN ROOM & LOAD DATA
     socket.on("join-room", async ({ roomId, username, userId, password }) => {
         socket.join(roomId);
-
+        setupTerminal(socket);
         try {
             // Find or Create Project (Room)
             let project = await prisma.project.findUnique({
@@ -140,7 +140,7 @@ io.on("connection", (socket) => {
                     return;
                 }
             }
-
+                
             // Fetch Chat History
             const messages = await prisma.message.findMany({
                 where: { projectId: project.id },
