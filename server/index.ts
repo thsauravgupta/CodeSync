@@ -2,7 +2,6 @@ import express from "express";
 import http from "http";
 import { Server } from "socket.io";
 import cors from "cors";
-// @ts-ignore
 import { YSocketIO } from "y-socket.io/dist/server";
 import dotenv from "dotenv";
 import { PrismaClient } from "@prisma/client";
@@ -11,7 +10,8 @@ import fs from "fs";
 import { exec } from "child_process";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
-import { setupTerminal } from "./terminalHandler"; // Import the terminal logic
+import { setupTerminal } from "./terminalHandler"; 
+import { codeQueue, queueEvents } from "./queue";
 
 dotenv.config();
 
@@ -27,11 +27,10 @@ const io = new Server(server, {
 const prisma = new PrismaClient();
 const JWT_SECRET = process.env.JWT_SECRET || "super-secret-key-change-this";
 
-// Initialize Yjs (Real-time Text Sync)
 const ysocketio = new YSocketIO(io, {});
 ysocketio.initialize();
 
-// --- 1. AUTHENTICATION API ---
+
 
 app.post("/register", async (req, res) => {
     const { email, password, name } = req.body;
@@ -61,7 +60,7 @@ app.post("/login", async (req, res) => {
     }
 });
 
-// --- 2. PROJECT MANAGEMENT API ---
+
 
 app.get("/projects/:userId", async (req, res) => {
     try {
@@ -109,15 +108,13 @@ app.delete("/projects/:projectId", async (req, res) => {
     }
 });
 
-// --- 3. CODE EXECUTION ENGINE (Docker) ---
-
 const LANGUAGE_CONFIG: any = {
     javascript: { image: "node:18-alpine", cmd: "node", ext: "js" },
     python: { image: "python:3.9-alpine", cmd: "python", ext: "py" },
     cpp: { image: "gcc:latest", cmd: "g++ -o /app/out /app/code.cpp && /app/out", ext: "cpp" }
 };
 
-// server/index.ts (Update the execute route)
+
 
 app.post("/execute", async (req, res) => {
     const { code, language } = req.body;
@@ -128,24 +125,19 @@ app.post("/execute", async (req, res) => {
     const hostTempDir = path.join(__dirname, "temp");
     const hostFilePath = path.join(hostTempDir, filename);
     
-    // Ensure temp dir exists
+
     if (!fs.existsSync(hostTempDir)) fs.mkdirSync(hostTempDir);
     fs.writeFileSync(hostFilePath, code);
 
-    // SECURITY: Limit Memory, CPU, Network, and explicitly name container for cleanup
     const containerName = `box_${Date.now()}`;
     const dockerCmd = `docker run --name ${containerName} --rm -v "${hostTempDir}:/app" -w /app --network none --memory="100m" --cpus="0.5" ${config.image} sh -c "${config.cmd.replace('code.cpp', filename).replace(filename, filename)}"`;
 
-    // EXECUTION with Safety Timeout
     exec(dockerCmd, { timeout: 4000 }, (error, stdout, stderr) => {
-        // Cleanup File
         fs.unlink(hostFilePath, () => {});
 
         if (error) {
-            // FORCE KILL if timeout happened (Zombie prevention)
             exec(`docker kill ${containerName}`, () => {}); 
             
-            // Check if it was a timeout
             if (error.killed) return res.json({ output: "Error: Execution Timed Out (Infinite Loop?)" });
             return res.json({ output: stderr || error.message });
         }
@@ -153,27 +145,21 @@ app.post("/execute", async (req, res) => {
     });
 });
 
-// SOCKET.IO (Real-time Logic)
 
 io.on("connection", (socket) => {
-    // A. INTERACTIVE TERMINAL (node-pty)
     setupTerminal(socket);
 
-    // B. DASHBOARD REAL-TIME STATS
     socket.on("join-dashboard", () => {
         socket.join("dashboard-room");
-        // Broadcast Stats immediately
         socket.emit("system-stats", { 
             activeRooms: io.sockets.adapter.rooms.size, 
             activeUsers: io.engine.clientsCount 
         });
     });
-
-    // C. JOIN ROOM & LOAD DATA
     socket.on("join-room", async ({ roomId, username, userId, password }) => {
         socket.join(roomId);
 
-        // Notify Dashboard (S-Tier Feature)
+        
         io.to("dashboard-room").emit("activity-log", {
             text: `${username} joined session ${roomId}`,
             time: new Date().toISOString()
@@ -184,27 +170,26 @@ io.on("connection", (socket) => {
         });
 
         try {
-            // Find Project
+            
             let project = await prisma.project.findUnique({
                 where: { roomId },
                 include: { files: true } 
             });
 
-            // Security Check
+            
             if (project && project.password && project.password !== password) {
                 socket.emit("error", "Incorrect Password");
                 return;
             }
 
-            // Create if guest/new (Optional fallback)
+           
             if (!project && userId) {
-                 // In a real app, you might block this, but for now we allow dynamic room creation
-                 // Use a default/guest user if needed, or error out.
-                 // Ideally projects are created via API now, so this handles "Load"
+                 //  might block this, but for now we allow dynamic room creation
+                 
             }
 
             if (project) {
-                 // Fetch Chat History
+                
                 const messages = await prisma.message.findMany({
                     where: { projectId: project.id },
                     orderBy: { createdAt: 'asc' },
@@ -232,7 +217,7 @@ io.on("connection", (socket) => {
         }
     });
 
-    // D. CHAT & SAVING
+    
     socket.on("chat-message", async (data) => {
         const { roomId, username, text, userId } = data;
         socket.to(roomId).emit("chat-message", data);
@@ -267,7 +252,7 @@ io.on("connection", (socket) => {
         } catch (e) { console.error("Auto-save failed:", e); }
     });
 
-    // E. WEBRTC AUDIO
+   
     socket.on("join-audio", (roomId) => {
         socket.to(roomId).emit("user-joined-audio", socket.id);
     });
@@ -275,12 +260,12 @@ io.on("connection", (socket) => {
     socket.on("answer", (payload) => { io.to(payload.target).emit("answer", payload); });
     socket.on("ice-candidate", (incoming) => { io.to(incoming.target).emit("ice-candidate", incoming.candidate); });
 
-    // F. STANDARD EVENTS
+   
     socket.on("file-change", ({ roomId, fileName }) => {
         socket.to(roomId).emit("file-change", fileName);
     });
     
-    // Cleanup Stats
+    
     socket.on("disconnect", () => {
          io.to("dashboard-room").emit("system-stats", { 
             activeRooms: io.sockets.adapter.rooms.size, 

@@ -30,7 +30,7 @@ const MatrixBackground = () => {
             ctx.fillRect(0, 0, canvas.width, canvas.height);
 
             ctx.fillStyle = '#0F0'; // Green text (Matrix style)
-            // You can change this to '#00f3ff' for Cyan (Cyberpunk)
+            
             ctx.font = `${fontSize}px monospace`;
 
             for (let i = 0; i < drops.length; i++) {
