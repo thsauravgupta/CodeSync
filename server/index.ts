@@ -2,26 +2,61 @@ import express from "express";
 import http from "http";
 import { Server } from "socket.io";
 import cors from "cors";
+// @ts-ignore
 import { YSocketIO } from "y-socket.io/dist/server";
 import dotenv from "dotenv";
 import { PrismaClient } from "@prisma/client";
 import path from "path";
 import fs from "fs";
-import { exec } from "child_process";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import helmet from "helmet"; // SECURITY: HTTP Header protection
+
+// Custom Modules
 import { setupTerminal } from "./terminalHandler"; 
 import { codeQueue, queueEvents } from "./queue";
+import { logger } from "./utils/logger";
+import IORedis from "ioredis"; 
+import { executeRateLimiter } from "./middleware/rateLimiter";
+import { validate, schemas } from "./middleware/validate"; // SECURITY: Payload validation
 
 dotenv.config();
 
 const app = express();
-app.use(cors());
-app.use(express.json());
-
 const server = http.createServer(app);
+
+// --- GLOBAL SECURITY MIDDLEWARE ---
+
+// 1. Helmet: Hides Express headers, prevents XSS, adds strict security headers
+app.use(helmet());
+
+// 2. Strict CORS: Never use "*" in production.
+const ALLOWED_ORIGINS = [
+    "http://localhost:5173", // Local frontend
+    process.env.FRONTEND_URL || "https://your-production-url.com" 
+];
+
+app.use(cors({
+    origin: (origin, callback) => {
+        // Allow requests with no origin (like Postman during dev) OR strictly allowed origins
+        if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(new Error('Blocked by strict CORS policy'));
+        }
+    },
+    credentials: true
+}));
+
+// 3. Payload Limit: Prevent memory exhaustion via massive JSON payloads
+app.use(express.json({ limit: "100kb" })); 
+
+// --- WEBSOCKET SETUP ---
 const io = new Server(server, {
-    cors: { origin: "*" }
+    cors: { 
+        origin: ALLOWED_ORIGINS,
+        credentials: true
+    }
 });
 
 const prisma = new PrismaClient();
@@ -30,9 +65,9 @@ const JWT_SECRET = process.env.JWT_SECRET || "super-secret-key-change-this";
 const ysocketio = new YSocketIO(io, {});
 ysocketio.initialize();
 
+// --- 1. AUTHENTICATION API (Protected by Zod Validation) ---
 
-
-app.post("/register", async (req, res) => {
+app.post("/register", validate(schemas.authPayload), async (req, res) => {
     const { email, password, name } = req.body;
     try {
         const hashedPassword = await bcrypt.hash(password, 10);
@@ -46,7 +81,7 @@ app.post("/register", async (req, res) => {
     }
 });
 
-app.post("/login", async (req, res) => {
+app.post("/login", validate(schemas.authPayload), async (req, res) => {
     const { email, password } = req.body;
     try {
         const user = await prisma.user.findUnique({ where: { email } });
@@ -60,7 +95,7 @@ app.post("/login", async (req, res) => {
     }
 });
 
-
+// --- 2. PROJECT MANAGEMENT API ---
 
 app.get("/projects/:userId", async (req, res) => {
     try {
@@ -108,43 +143,48 @@ app.delete("/projects/:projectId", async (req, res) => {
     }
 });
 
-const LANGUAGE_CONFIG: any = {
-    javascript: { image: "node:18-alpine", cmd: "node", ext: "js" },
-    python: { image: "python:3.9-alpine", cmd: "python", ext: "py" },
-    cpp: { image: "gcc:latest", cmd: "g++ -o /app/out /app/code.cpp && /app/out", ext: "cpp" }
-};
-
-
-
-app.post("/execute", async (req, res) => {
+// --- 3. CODE EXECUTION (QUEUE DISPATCHER) ---
+// Protected by Rate Limiter (Redis) AND Payload Validation (Zod)
+app.post("/execute", executeRateLimiter, validate(schemas.executePayload), async (req, res) => {
     const { code, language } = req.body;
-    const config = LANGUAGE_CONFIG[language];
-    if (!config) return res.status(400).json({ output: "Language not supported" });
-
-    const filename = `code_${Date.now()}_${Math.random().toString(36).substr(2, 9)}.${config.ext}`;
-    const hostTempDir = path.join(__dirname, "temp");
-    const hostFilePath = path.join(hostTempDir, filename);
     
+    try {
+        // Dispatch job to Redis queue (Handled by worker.ts)
+        const job = await codeQueue.add("run-code", { code, language });
 
-    if (!fs.existsSync(hostTempDir)) fs.mkdirSync(hostTempDir);
-    fs.writeFileSync(hostFilePath, code);
+        // Wait for worker node to process job
+        const result = await job.waitUntilFinished(queueEvents);
 
-    const containerName = `box_${Date.now()}`;
-    const dockerCmd = `docker run --name ${containerName} --rm -v "${hostTempDir}:/app" -w /app --network none --memory="100m" --cpus="0.5" ${config.image} sh -c "${config.cmd.replace('code.cpp', filename).replace(filename, filename)}"`;
-
-    exec(dockerCmd, { timeout: 4000 }, (error, stdout, stderr) => {
-        fs.unlink(hostFilePath, () => {});
-
-        if (error) {
-            exec(`docker kill ${containerName}`, () => {}); 
-            
-            if (error.killed) return res.json({ output: "Error: Execution Timed Out (Infinite Loop?)" });
-            return res.json({ output: stderr || error.message });
-        }
-        res.json({ output: stdout });
-    });
+        res.json(result);
+    } catch (err: any) {
+        logger.error("Queue submission failed", { error: err.message });
+        res.status(500).json({ output: "System Error: Job failed to execute" });
+    }
 });
 
+// --- 4. SYSTEM HEALTH MONITORING ---
+
+app.get("/health", async (req, res) => {
+    try {
+        await prisma.$queryRaw`SELECT 1`;
+        
+        const redisClient = new IORedis(process.env.REDIS_URL || 'redis://127.0.0.1:6379', { maxRetriesPerRequest: 1 });
+        await redisClient.ping();
+        redisClient.disconnect();
+
+        res.status(200).json({ 
+            status: "ok", 
+            timestamp: new Date().toISOString(),
+            database: "connected",
+            redis: "connected"
+        });
+    } catch (error: any) {
+        logger.error("Health Check Failed", { error: error.message, stack: error.stack });
+        res.status(500).json({ status: "error", message: "System degraded" });
+    }
+});
+
+// --- 5. WEBSOCKET CONTROLLER ---
 
 io.on("connection", (socket) => {
     setupTerminal(socket);
@@ -156,40 +196,32 @@ io.on("connection", (socket) => {
             activeUsers: io.engine.clientsCount 
         });
     });
+
     socket.on("join-room", async ({ roomId, username, userId, password }) => {
         socket.join(roomId);
 
-        
         io.to("dashboard-room").emit("activity-log", {
             text: `${username} joined session ${roomId}`,
             time: new Date().toISOString()
         });
+        
         io.to("dashboard-room").emit("system-stats", { 
             activeRooms: io.sockets.adapter.rooms.size, 
             activeUsers: io.engine.clientsCount 
         });
 
         try {
-            
             let project = await prisma.project.findUnique({
                 where: { roomId },
                 include: { files: true } 
             });
 
-            
             if (project && project.password && project.password !== password) {
                 socket.emit("error", "Incorrect Password");
                 return;
             }
 
-           
-            if (!project && userId) {
-                 //  might block this, but for now we allow dynamic room creation
-                 
-            }
-
             if (project) {
-                
                 const messages = await prisma.message.findMany({
                     where: { projectId: project.id },
                     orderBy: { createdAt: 'asc' },
@@ -212,12 +244,11 @@ io.on("connection", (socket) => {
             socket.to(roomId).emit("notification", `${username} joined the room`);
 
         } catch (err) {
-            console.error("DB Error on Join:", err);
+            logger.error("DB Error on Join", { error: err });
             socket.emit("error", "Failed to load project data.");
         }
     });
 
-    
     socket.on("chat-message", async (data) => {
         const { roomId, username, text, userId } = data;
         socket.to(roomId).emit("chat-message", data);
@@ -229,7 +260,9 @@ io.on("connection", (socket) => {
                     data: { text, projectId: project.id, userId: userId }
                 });
             }
-        } catch (e) { console.error(e); }
+        } catch (e) { 
+            logger.error("Message save failed", { error: e }); 
+        }
     });
 
     socket.on("save-file", async ({ roomId, fileName, content }) => {
@@ -237,7 +270,6 @@ io.on("connection", (socket) => {
             const project = await prisma.project.findUnique({ where: { roomId } });
             if (!project) return;
 
-            // Upsert (Update if exists, Create if not - handles "Import Folder")
             const file = await prisma.file.findFirst({
                 where: { projectId: project.id, name: fileName }
             });
@@ -249,22 +281,22 @@ io.on("connection", (socket) => {
                     data: { name: fileName, content, language: "javascript", projectId: project.id }
                 });
             }
-        } catch (e) { console.error("Auto-save failed:", e); }
+        } catch (e) { 
+            logger.error("Auto-save failed", { error: e }); 
+        }
     });
 
-   
     socket.on("join-audio", (roomId) => {
         socket.to(roomId).emit("user-joined-audio", socket.id);
     });
+    
     socket.on("offer", (payload) => { io.to(payload.target).emit("offer", payload); });
     socket.on("answer", (payload) => { io.to(payload.target).emit("answer", payload); });
     socket.on("ice-candidate", (incoming) => { io.to(incoming.target).emit("ice-candidate", incoming.candidate); });
 
-   
     socket.on("file-change", ({ roomId, fileName }) => {
         socket.to(roomId).emit("file-change", fileName);
     });
-    
     
     socket.on("disconnect", () => {
          io.to("dashboard-room").emit("system-stats", { 
@@ -276,5 +308,5 @@ io.on("connection", (socket) => {
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
-    console.log(`SERVER RUNNING on Port ${PORT}`);
+   logger.info(`API Gateway listening`, { port: PORT });
 });
