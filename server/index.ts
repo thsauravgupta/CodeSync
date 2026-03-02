@@ -19,6 +19,7 @@ import { logger } from "./utils/logger";
 import IORedis from "ioredis"; 
 import { executeRateLimiter } from "./middleware/rateLimiter";
 import { validate, schemas } from "./middleware/validate"; // SECURITY: Payload validation
+import { v4 as uuidv4 } from 'uuid';
 
 dotenv.config();
 
@@ -94,9 +95,191 @@ app.post("/login", validate(schemas.authPayload), async (req, res) => {
         res.status(500).json({ error: "Login failed" });
     }
 });
+// --- GITHUB OAUTH INTEGRATION ---
 
+// 1. Redirect user to GitHub's consent screen
+app.get("/auth/github", (req, res) => {
+    const clientId = process.env.GITHUB_CLIENT_ID;
+    const redirectUri = "http://localhost:3001/auth/github/callback";
+    // We request 'repo' scope to read and write to their repositories
+    const githubAuthUrl = `https://github.com/login/oauth/authorize?client_id=${clientId}&redirect_uri=${redirectUri}&scope=repo`;
+    
+    res.redirect(githubAuthUrl);
+});
+
+// 2. GitHub redirects back here with a temporary 'code'
+app.get("/auth/github/callback", async (req, res) => {
+    const { code, state } = req.query; // state can be used to pass the userId securely
+
+    if (!code) {
+        return res.status(400).send("No code provided by GitHub");
+    }
+
+    try {
+        // Exchange the code for an Access Token
+        const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            },
+            body: JSON.stringify({
+                client_id: process.env.GITHUB_CLIENT_ID,
+                client_secret: process.env.GITHUB_CLIENT_SECRET,
+                code: code
+            })
+        });
+
+        const tokenData = await tokenResponse.json();
+        const accessToken = tokenData.access_token;
+
+        if (!accessToken) {
+            throw new Error("Failed to retrieve access token");
+        }
+
+        // TODO: In Phase 2, we will link this token to the logged-in user in Postgres.
+        // For now, we will redirect back to the frontend with the token so you can test it.
+        res.redirect(`http://localhost:5173/dashboard?github_connected=true&token=${accessToken}`);
+
+    } catch (error: any) {
+        logger.error("GitHub OAuth Failed", { error: error.message });
+        res.status(500).send("Authentication failed");
+    }
+}); 
+// --- GITHUB OAUTH INTEGRATION ---
+
+// 1. Redirect user to GitHub's consent screen (UPDATED)
+app.get("/auth/github", (req, res) => {
+    const clientId = process.env.GITHUB_CLIENT_ID;
+    const redirectUri = "http://localhost:3001/auth/github/callback";
+    
+    // NEW: Grab the userId from the query string and encode it in the 'state' parameter
+    const userId = req.query.userId as string;
+    if (!userId) return res.status(400).send("User ID is required");
+    
+    // Encode userId to base64 so it safely travels through GitHub's URL
+    const state = Buffer.from(JSON.stringify({ userId })).toString('base64');
+    
+    const githubAuthUrl = `https://github.com/login/oauth/authorize?client_id=${clientId}&redirect_uri=${redirectUri}&scope=repo&state=${state}`;
+    
+    res.redirect(githubAuthUrl);
+});
+
+// 2. GitHub redirects back here (UPDATED)
+app.get("/auth/github/callback", async (req, res) => {
+    const { code, state } = req.query;
+
+    if (!code || !state) return res.status(400).send("Invalid OAuth callback");
+
+    try {
+        // Decode the state to get our userId back
+        const decodedState = JSON.parse(Buffer.from(state as string, 'base64').toString('utf-8'));
+        const userId = decodedState.userId;
+
+        // Exchange the code for an Access Token
+        const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Accept": "application/json" },
+            body: JSON.stringify({
+                client_id: process.env.GITHUB_CLIENT_ID,
+                client_secret: process.env.GITHUB_CLIENT_SECRET,
+                code: code
+            })
+        });
+
+        const tokenData = await tokenResponse.json();
+        const accessToken = tokenData.access_token;
+
+        if (!accessToken) throw new Error("Failed to retrieve access token");
+
+        // THE CRITICAL STEP: Save the token to the User in the Database
+        await prisma.user.update({
+            where: { id: userId },
+            data: { gitHubToken: accessToken }
+        });
+
+        logger.info("GitHub successfully linked to user", { userId });
+
+        // Redirect back to dashboard - no need to expose the token in the URL anymore!
+        res.redirect(`http://localhost:5173/dashboard?github_connected=true`);
+
+    } catch (error: any) {
+        logger.error("GitHub OAuth Failed", { error: error.message });
+        res.status(500).send("Authentication failed");
+    }
+});
 // --- 2. PROJECT MANAGEMENT API ---
+// --- IMPORT REPOSITORY FROM GITHUB ---
 
+
+app.post("/projects/import-github", async (req, res) => {
+    const { userId, repoUrl } = req.body; // repoUrl format: "owner/repo" e.g., "facebook/react"
+
+    try {
+        // 1. Get the user's secure token
+        const user = await prisma.user.findUnique({ where: { id: userId } });
+        if (!user || !user.gitHubToken) {
+            return res.status(403).json({ error: "GitHub not connected" });
+        }
+
+        const githubToken = user.gitHubToken;
+        const headers = {
+            "Authorization": `Bearer ${githubToken}`,
+            "Accept": "application/vnd.github.v3+json"
+        };
+
+        // 2. Fetch the default branch (usually main or master)
+        const repoRes = await fetch(`https://api.github.com/repos/${repoUrl}`, { headers });
+        if (!repoRes.ok) throw new Error("Repository not found or access denied");
+        const repoData = await repoRes.json();
+        const defaultBranch = repoData.default_branch;
+
+        // 3. Fetch the ENTIRE file tree recursively in ONE API call
+        const treeRes = await fetch(`https://api.github.com/repos/${repoUrl}/git/trees/${defaultBranch}?recursive=1`, { headers });
+        const treeData = await treeRes.json();
+
+        // 4. Create a new CodeSync Project
+        const newRoomId = uuidv4().slice(0, 8).toUpperCase();
+        const project = await prisma.project.create({
+            data: {
+                name: repoData.name,
+                roomId: newRoomId,
+                ownerId: userId,
+            }
+        });
+
+        
+        let filePromises = [];
+        
+        for (const item of treeData.tree) {
+            // Skip massive folders like node_modules or .git
+            if (item.path.includes("node_modules") || item.path.includes(".git")) continue;
+
+            const isFolder = item.type === "tree";
+            
+
+            filePromises.push(
+                prisma.file.create({
+                    data: {
+                        name: item.path, 
+                        projectId: project.id,
+                        content: isFolder ? "" : `// Imported from ${repoUrl}/${item.path}`,
+                        language: "javascript" 
+                    }
+                })
+            );
+        }
+
+        await Promise.all(filePromises);
+        logger.info("GitHub Repository Imported", { repoUrl, projectId: project.id });
+
+        res.json(project);
+
+    } catch (error: any) {
+        logger.error("Import Failed", { error: error.message });
+        res.status(500).json({ error: "Failed to import repository" });
+    }
+});
 app.get("/projects/:userId", async (req, res) => {
     try {
         const projects = await prisma.project.findMany({

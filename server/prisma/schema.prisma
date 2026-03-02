@@ -14,7 +14,7 @@ model User {
   email     String   @unique
   password  String   
   name      String
-  
+  gitHubToken String?
   // Relations
   projects  Project[]
   messages  Message[]
